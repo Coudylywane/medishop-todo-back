@@ -1,0 +1,82 @@
+name: CD Back
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Connexion à GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build et push de l'image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Déploiement via SSH (bastion Front -> Back)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.BACK_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          proxy_host: ${{ secrets.FRONT_HOST }}
+          proxy_username: ${{ secrets.SSH_USER }}
+          proxy_key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            IMAGE=ghcr.io/${{ github.repository }}:latest
+            docker pull $IMAGE
+
+            if [ "$(docker ps -aq -f name=todo-back)" ]; then
+              RUNNING_IMAGE=$(docker inspect --format='{{.Config.Image}}' todo-back)
+              docker tag $RUNNING_IMAGE ghcr.io/${{ github.repository }}:previous || true
+              docker stop todo-back || true
+              docker rm todo-back || true
+            fi
+
+            docker run -d --name todo-back \
+              --restart unless-stopped \
+              -p 8087:8087 \
+              -e SPRING_DATASOURCE_URL=jdbc:postgresql://${{ secrets.DB_HOST }}:5432/${{ secrets.DB_NAME }} \
+              -e SPRING_DATASOURCE_USERNAME=${{ secrets.DB_USER }} \
+              -e SPRING_DATASOURCE_PASSWORD=${{ secrets.DB_PASSWORD }} \
+              $IMAGE
+
+            sleep 15
+            if ! curl -sf http://localhost:8087/api/tasks > /dev/null; then
+              echo "Déploiement échoué, rollback en cours..."
+              docker stop todo-back || true
+              docker rm todo-back || true
+              docker run -d --name todo-back \
+                --restart unless-stopped \
+                -p 8087:8087 \
+                -e SPRING_DATASOURCE_URL=jdbc:postgresql://${{ secrets.DB_HOST }}:5432/${{ secrets.DB_NAME }} \
+                -e SPRING_DATASOURCE_USERNAME=${{ secrets.DB_USER }} \
+                -e SPRING_DATASOURCE_PASSWORD=${{ secrets.DB_PASSWORD }} \
+                ghcr.io/${{ github.repository }}:previous
+              exit 1
+            fi
+            echo "Déploiement réussi."
