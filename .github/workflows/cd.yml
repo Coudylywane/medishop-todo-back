@@ -71,7 +71,7 @@ jobs:
               -e SPRING_DATASOURCE_PASSWORD=${{ secrets.DB_PASSWORD }} \
               $IMAGE
             
-            sleep 15
+            sleep 30
             if ! curl -sf http://localhost:8087/api/tasks > /dev/null; then
               echo "Déploiement échoué, rollback en cours..."
               docker stop todo-back || true
